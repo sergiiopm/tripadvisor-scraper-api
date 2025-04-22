@@ -24,6 +24,7 @@ def obtener_html_con_playwright(url: str) -> str:
     Lanza un Chromium headless con Playwright, navega a la URL y devuelve
     el HTML renderizado (incluyendo el <script> con pageManifest).
     """
+    url = str(url)
     logger.info(f"[Playwright] Navegando a {url}")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=[
@@ -88,6 +89,8 @@ def scraper_tripadvisor(start_url: str, delay: float = 2.0) -> List[Dict]:
     Dada la URL de TripAdvisor, abre con Playwright, extrae el JSON
     de pageManifest y devuelve todas las reseñas encontradas.
     """
+    start_url = str(start_url)
+
     logger.info(f"Iniciando scraper para: {start_url}")
     # 1) Obtenemos el HTML renderizado
     html = obtener_html_con_playwright(start_url)
