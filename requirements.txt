@@ -1,5 +1,6 @@
 fastapi
 uvicorn[standard]
+httpx[http2]
 requests
 beautifulsoup4
 pydantic

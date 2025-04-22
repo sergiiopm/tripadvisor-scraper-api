@@ -1,13 +1,15 @@
-import random
 import re
+import json
 import time
+import random
 import logging
+
+from typing import List, Dict
 from urllib.parse import urljoin
 
-import cloudscraper
-from bs4 import BeautifulSoup
+import httpx
 
-# ─── Logging ───────────────────────────────────────────────────────
+# ─── Configuración de logging ─────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -18,19 +20,21 @@ logger = logging.getLogger(__name__)
 # ─── Constantes ────────────────────────────────────────────────────
 BASE_DOMAIN = "https://www.tripadvisor.es"
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 "
-    "(KHTML, like Gecko) Version/16.6 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/116.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+    "Version/16.6 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/115.0.0.0 Safari/537.36",
 ]
 
-# Creamos un cloudscraper «base»
-scraper = cloudscraper.create_scraper()
-
-def obtener_sopa(url: str) -> BeautifulSoup:
-    """Descarga la página e informa por logging."""
+def fetch_html(url: str) -> str:
+    """
+    Descarga la página usando HTTP/2 y un User‑Agent aleatorio.
+    """
     ua = random.choice(USER_AGENTS)
     headers = {
         "User-Agent": ua,
@@ -39,105 +43,66 @@ def obtener_sopa(url: str) -> BeautifulSoup:
         "Referer": "https://www.google.com/",
         "Connection": "keep-alive",
     }
-
-    logger.info(f"Fetching URL: {url}")
-    logger.debug(f"Headers: {headers}")
-
-    try:
-        resp = scraper.get(url, headers=headers, timeout=15)
+    logger.info(f"GET (HTTP/2) {url}")
+    with httpx.Client(http2=True, headers=headers, timeout=15) as client:
+        resp = client.get(url)
         logger.info(f"→ Status code: {resp.status_code}")
         resp.raise_for_status()
-        return BeautifulSoup(resp.text, "html.parser")
-    except Exception as e:
-        logger.error(f"Error fetching {url}: {e}")
-        raise
+        return resp.text
 
-def parsear_pagina(soup: BeautifulSoup) -> list[dict]:
-    """Extrae todas las reseñas de la página actual."""
-    cards = soup.find_all("div", {"data-automation": "reviewCard"})
-    logger.info(f"Found {len(cards)} review cards on this page")
+def extract_page_manifest(html: str) -> Dict:
+    """
+    Extrae el objeto JavaScript `pageManifest:{ ... };` y lo devuelve como dict.
+    """
+    logger.info("Buscando pageManifest en el HTML...")
+    m = re.search(r"pageManifest\s*:\s*(\{.+?\});", html, re.DOTALL)
+    if not m:
+        logger.error("No se encontró pageManifest en la página.")
+        raise RuntimeError("pageManifest not found")
+    manifest_json = m.group(1)
+    data = json.loads(manifest_json)
+    logger.info("pageManifest parseado correctamente.")
+    return data
+
+def parse_reviews_from_manifest(manifest: Dict) -> List[Dict]:
+    """
+    Recorre el manifest y extrae las reseñas encontradas en cualquier sección
+    que incluya la clave 'listResults'.
+    """
     reviews = []
-
-    for idx, card in enumerate(cards, start=1):
-        # --- Usuario y avatar ---
-        user = None
-        avatar_url = None
-        perfiles = card.find_all("a", href=re.compile(r"^/Profile/"))
-        for p in perfiles:
-            img = p.find("img")
-            if img and img.has_attr("src"):
-                avatar_url = img["src"]
-            else:
-                user = p.get_text(strip=True)
-
-        # --- Rating ---
-        rating = None
-        svg = card.find("svg", {"data-automation": "bubbleRatingImage"})
-        if svg and (t := svg.find("title")):
-            rating = int(float(t.get_text(strip=True).split()[0]))
-
-        # --- Título, enlace e ID ---
-        title = review_url = review_id = None
-        tc = card.find("div", {"data-test-target": "review-title"})
-        if tc and (a := tc.find("a", href=True)):
-            title = a.get_text(strip=True)
-            review_url = urljoin(BASE_DOMAIN, a["href"])
-            if m := re.search(r"-r(\d+)-", a["href"]):
-                review_id = m.group(1)
-
-        # --- Descripción ---
-        description = None
-        body = card.find("div", {"data-test-target": "review-body"})
-        if body and (span := body.find("span", class_=re.compile(r"JguWG"))):
-            description = span.get_text(strip=True)
-
-        logger.debug(
-            f"Review {idx}: user={user!r}, rating={rating}, review_id={review_id}"
-        )
-
-        reviews.append({
-            "user": user,
-            "avatar_url": avatar_url,
-            "rating": rating,
-            "title": title,
-            "description": description,
-            "review_url": review_url,
-            "review_id": review_id,
-        })
-
+    for section_name, section in manifest.items():
+        if isinstance(section, dict) and "listResults" in section:
+            items = section["listResults"]
+            logger.info(f"Extrayendo {len(items)} reseñas de la sección '{section_name}'")
+            for item in items:
+                reviews.append({
+                    "user": item.get("userDisplayName"),
+                    "avatar_url": item.get("userProfile", {}).get("avatarUrl"),
+                    "rating": item.get("rating"),
+                    "title": item.get("title"),
+                    "description": item.get("text"),
+                    "review_url": urljoin(BASE_DOMAIN, item.get("url", "")),
+                    "review_id": item.get("reviewId"),
+                })
+    logger.info(f"Total reviews extraídas: {len(reviews)}")
     return reviews
 
-def scraper_tripadvisor(start_url: str, delay: float = 2.0) -> list[dict]:
+def scraper_tripadvisor(start_url: str, delay: float = 2.0) -> List[Dict]:
     """
-    Recorre todas las páginas de reseñas e imprime logs de cada paso.
+    Dada la URL de la ficha de Tripadvisor, descarga la página,
+    extrae el pageManifest y devuelve la lista de reseñas.
     """
-    # Forzamos que start_url sea str, no HttpUrl u otro tipo
     start_url = str(start_url)
-    logger.info(f"Starting scraper for: {start_url}")
+    logger.info(f"Iniciando scraper para: {start_url}")
 
-    all_reviews = []
-    next_page = start_url
-    page = 1
+    html = fetch_html(start_url)
+    manifest = extract_page_manifest(html)
+    reviews = parse_reviews_from_manifest(manifest)
 
-    while next_page:
-        logger.info(f"=== Page {page} ===")
-        soup = obtener_sopa(next_page)
-        bloque = parsear_pagina(soup)
-        if not bloque:
-            logger.info("No reviews found on this page, stopping.")
-            break
-        all_reviews.extend(bloque)
+    # Opcional: si quieres paginar, podrías leer en manifest:
+    # next_url = manifest.get("properties", {}).get("pagination", {}).get("nextUrl")
+    # if next_url:
+    #     time.sleep(delay)
+    #     reviews += scraper_tripadvisor(urljoin(BASE_DOMAIN, next_url), delay)
 
-        # Paginación
-        nxt = soup.find("a", {"data-smoke-attr": "pagination-next-arrow"})
-        if nxt and nxt.has_attr("href"):
-            next_page = urljoin(BASE_DOMAIN, nxt["href"])
-            logger.info(f"Next page URL: {next_page}")
-            page += 1
-            time.sleep(delay)
-        else:
-            logger.info("No next page link found, finished pagination.")
-            break
-
-    logger.info(f"Finished scraping. Total reviews: {len(all_reviews)}")
-    return all_reviews
+    return reviews
