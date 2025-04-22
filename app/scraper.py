@@ -21,6 +21,7 @@ BASE_DOMAIN = "https://www.tripadvisor.es"
 VIEWPORT = {"width": 1280, "height": 800}
 REVIEW_CARD_SELECTOR = 'div[data-automation="reviewCard"]'
 NEXT_BUTTON_SELECTOR = 'a[data-smoke-attr="pagination-next-arrow"]'
+COOKIE_ACCEPT_BUTTON = '#onetrust-accept-btn-handler'  # id estándar del banner de cookies
 
 async def parsear_pagina(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
@@ -29,7 +30,6 @@ async def parsear_pagina(html: str) -> List[Dict]:
     reviews = []
 
     for idx, card in enumerate(cards, start=1):
-        # Usuario y avatar
         user = avatar_url = None
         for p in card.select('a[href^="/Profile/"]'):
             img = p.find("img")
@@ -38,13 +38,11 @@ async def parsear_pagina(html: str) -> List[Dict]:
             else:
                 user = p.get_text(strip=True)
 
-        # Rating
         rating = None
         if (svg := card.select_one('svg[data-automation="bubbleRatingImage"]')):
             if (t := svg.find("title")):
                 rating = int(float(t.get_text(strip=True).split()[0]))
 
-        # Título, enlace e ID
         title = review_url = review_id = None
         if (a := card.select_one('div[data-test-target="review-title"] a[href]')):
             title = a.get_text(strip=True)
@@ -52,7 +50,6 @@ async def parsear_pagina(html: str) -> List[Dict]:
             if m := re.search(r"-r(\d+)-", a["href"]):
                 review_id = m.group(1)
 
-        # Descripción
         description = None
         if (span := card.select_one('div[data-test-target="review-body"] span.JguWG')):
             description = span.get_text(strip=True)
@@ -74,7 +71,6 @@ async def scraper_tripadvisor(start_url: str, delay: float = 2.0) -> List[Dict]:
     logger.info(f"Iniciando scraper (Playwright) para: {start_url}")
 
     all_reviews: List[Dict] = []
-
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -96,27 +92,39 @@ async def scraper_tripadvisor(start_url: str, delay: float = 2.0) -> List[Dict]:
         while next_url:
             logger.info(f"=== Página {page_num} ===")
             await page.goto(next_url, timeout=30000)
-            # Esperamos explicitamente a que carguen las reseñas
+            await page.wait_for_load_state("networkidle")
+
+            # 1) Cerrar banner de cookies si existe
+            try:
+                btn = await page.query_selector(COOKIE_ACCEPT_BUTTON)
+                if btn:
+                    await btn.click()
+                    logger.info("Banner de cookies aceptado")
+                    await asyncio.sleep(1)
+            except Exception:
+                pass
+
+            # 2) Scroll “fuerte” para cargar reseñas diferidas
+            for _ in range(5):
+                await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+                await asyncio.sleep(1)
+
+            # 3) Esperar a que el selector de reseñas aparezca
             try:
                 await page.wait_for_selector(REVIEW_CARD_SELECTOR, timeout=15000)
             except Exception:
-                logger.warning("Timeout esperando reseñas; intentar un scroll y reesperar")
-                # forzar scroll para cargar más reseñas
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await asyncio.sleep(2)
-                await page.wait_for_selector(REVIEW_CARD_SELECTOR, timeout=10000)
+                logger.warning("Sigue sin aparecer ninguna reseña tras scroll")
 
             html = await page.content()
             logger.info(f"[Playwright] HTML obtenido ({len(html)} caracteres)")
-
-            # Parsear la página
             reviews = await parsear_pagina(html)
+
             if not reviews:
                 logger.info("No hay reviews en esta página, deteniendo.")
                 break
             all_reviews.extend(reviews)
 
-            # Paginación: click en "siguiente" o lectura de href
+            # 4) Paginación: siguiente
             elem = await page.query_selector(NEXT_BUTTON_SELECTOR)
             if not elem:
                 logger.info("No hay botón 'Página siguiente'; fin de paginación.")
