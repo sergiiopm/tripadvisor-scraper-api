@@ -2,13 +2,12 @@ from fastapi import FastAPI, HTTPException
 from .models import ScrapeRequest, ScrapeResponse
 from .scraper import scraper_tripadvisor
 
-app = FastAPI(title="TripAdvisor Scraper API")
+app = FastAPI()
 
 @app.post("/scrape", response_model=ScrapeResponse)
-async def scrape_endpoint(req: ScrapeRequest):
-    url_str = str(req.url)
+def scrape_endpoint(req: ScrapeRequest):
     try:
-        reviews = await scraper_tripadvisor(url_str)
-        return ScrapeResponse(reviews=reviews)
+        data = scraper_tripadvisor(str(req.url))
+        return ScrapeResponse(reviews=data)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
