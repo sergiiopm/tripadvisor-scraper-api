@@ -140,6 +140,14 @@ async def scraper_tripadvisor(start_url: str, delay: float = 2.0) -> List[Dict]:
 
             # 4) Extraer HTML y parsear
             html = await page.content()
+            
+            # ─── OPCIÓN 2: imprimir extracto del HTML en logs ────────────────
+            logger.debug("=== RAW HTML START ===")
+            for line in html.splitlines():   # imprime sólo las primeras 50 líneas
+                logger.debug(line)
+            logger.debug("=== RAW HTML END ===")
+            # ─────────────────────────────────────────────────────────────────
+
             logger.info(f"[Playwright] HTML obtenido ({len(html)} car.)")
             reviews = await parsear_pagina(html)
 
