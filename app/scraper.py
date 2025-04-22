@@ -1,21 +1,30 @@
 import requests
 from bs4 import BeautifulSoup
+import cloudscraper
+import os
 import re
 import time
 from urllib.parse import urljoin
 
 BASE_DOMAIN = "https://www.tripadvisor.es"
 
+# Creamos un scraper de cloudscraper al inicio:
+scraper = cloudscraper.create_scraper(
+    browser={"browser": "chrome", "platform": "windows", "mobile": False}
+)
+# Opcional: añade cabeceras extra
+scraper.headers.update({
+    "Accept-Language": "es-ES,es;q=0.9",
+    "Referer": "https://www.google.com/",
+})
+
 def scraper_tripadvisor(start_url: str, delay: float = 2.0):
     def obtener_sopa(url):
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/90.0.4430.93 Safari/537.36"
-            )
-        }
-        resp = requests.get(url, headers=headers, timeout=10)
+        """
+        Descarga la página con cloudscraper para evitar bloqueos 403.
+        """
+        # Si tienes proxy configurado por ENV vars, cloudscraper lo usa automáticamente.
+        resp = scraper.get(url, timeout=15)
         resp.raise_for_status()
         return BeautifulSoup(resp.text, "html.parser")
 
