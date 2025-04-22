@@ -7,7 +7,7 @@ from urllib.parse import urljoin
 import cloudscraper
 from bs4 import BeautifulSoup
 
-# ─── Configuración de logging ───────────────────────────────────
+# ─── Logging ───────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -15,7 +15,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─── Constantes y scraper ────────────────────────────────────────
+# ─── Constantes ────────────────────────────────────────────────────
 BASE_DOMAIN = "https://www.tripadvisor.es"
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -26,10 +26,11 @@ USER_AGENTS = [
     "(KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
 ]
 
+# Creamos un cloudscraper «base»
 scraper = cloudscraper.create_scraper()
 
 def obtener_sopa(url: str) -> BeautifulSoup:
-    """Descarga la página e informa en logs del proceso."""
+    """Descarga la página e informa por logging."""
     ua = random.choice(USER_AGENTS)
     headers = {
         "User-Agent": ua,
@@ -52,13 +53,15 @@ def obtener_sopa(url: str) -> BeautifulSoup:
         raise
 
 def parsear_pagina(soup: BeautifulSoup) -> list[dict]:
-    """Extrae y devuelve la lista de reviews de una sola página."""
+    """Extrae todas las reseñas de la página actual."""
     cards = soup.find_all("div", {"data-automation": "reviewCard"})
     logger.info(f"Found {len(cards)} review cards on this page")
     reviews = []
 
     for idx, card in enumerate(cards, start=1):
-        user = avatar_url = None
+        # --- Usuario y avatar ---
+        user = None
+        avatar_url = None
         perfiles = card.find_all("a", href=re.compile(r"^/Profile/"))
         for p in perfiles:
             img = p.find("img")
@@ -67,13 +70,13 @@ def parsear_pagina(soup: BeautifulSoup) -> list[dict]:
             else:
                 user = p.get_text(strip=True)
 
-        # Rating
+        # --- Rating ---
         rating = None
         svg = card.find("svg", {"data-automation": "bubbleRatingImage"})
         if svg and (t := svg.find("title")):
             rating = int(float(t.get_text(strip=True).split()[0]))
 
-        # Title, URL & ID
+        # --- Título, enlace e ID ---
         title = review_url = review_id = None
         tc = card.find("div", {"data-test-target": "review-title"})
         if tc and (a := tc.find("a", href=True)):
@@ -82,15 +85,14 @@ def parsear_pagina(soup: BeautifulSoup) -> list[dict]:
             if m := re.search(r"-r(\d+)-", a["href"]):
                 review_id = m.group(1)
 
-        # Description
+        # --- Descripción ---
         description = None
         body = card.find("div", {"data-test-target": "review-body"})
         if body and (span := body.find("span", class_=re.compile(r"JguWG"))):
             description = span.get_text(strip=True)
 
         logger.debug(
-            f"Review {idx}: user={user!r}, rating={rating}, "
-            f"review_id={review_id}"
+            f"Review {idx}: user={user!r}, rating={rating}, review_id={review_id}"
         )
 
         reviews.append({
@@ -108,9 +110,11 @@ def parsear_pagina(soup: BeautifulSoup) -> list[dict]:
 def scraper_tripadvisor(start_url: str, delay: float = 2.0) -> list[dict]:
     """
     Recorre todas las páginas de reseñas e imprime logs de cada paso.
-    Devuelve la lista completa de reviews.
     """
-    logger.info("Starting scraper for: " + start_url)
+    # Forzamos que start_url sea str, no HttpUrl u otro tipo
+    start_url = str(start_url)
+    logger.info(f"Starting scraper for: {start_url}")
+
     all_reviews = []
     next_page = start_url
     page = 1
