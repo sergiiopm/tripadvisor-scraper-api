@@ -21,7 +21,21 @@ BASE_DOMAIN = "https://www.tripadvisor.es"
 VIEWPORT = {"width": 1280, "height": 800}
 REVIEW_CARD_SELECTOR = 'div[data-automation="reviewCard"]'
 NEXT_BUTTON_SELECTOR = 'a[data-smoke-attr="pagination-next-arrow"]'
-COOKIE_ACCEPT_BUTTON = '#onetrust-accept-btn-handler'  # id estándar del banner de cookies
+COOKIE_ACCEPT_BUTTON = '#onetrust-accept-btn-handler'
+
+# ─── Stealth JavaScript para evadir detección ──────────────────────
+STEALTH_JS = """
+() => {
+  // Navegador no “webdriver”
+  Object.defineProperty(navigator, 'webdriver', { get: () => false });
+  // Lenguajes
+  Object.defineProperty(navigator, 'languages', { get: () => ['es-ES','es'] });
+  // Plugins
+  Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+  // Chrome runtime
+  window.chrome = { runtime: {} };
+}
+"""
 
 async def parsear_pagina(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
@@ -68,14 +82,19 @@ async def parsear_pagina(html: str) -> List[Dict]:
 
 async def scraper_tripadvisor(start_url: str, delay: float = 2.0) -> List[Dict]:
     start_url = str(start_url)
-    logger.info(f"Iniciando scraper (Playwright) para: {start_url}")
+    logger.info(f"Iniciando scraper (Playwright stealth) para: {start_url}")
 
     all_reviews: List[Dict] = []
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"]
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled"
+            ]
         )
+
         context = await browser.new_context(
             viewport=VIEWPORT,
             user_agent=(
@@ -83,8 +102,13 @@ async def scraper_tripadvisor(start_url: str, delay: float = 2.0) -> List[Dict]:
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/116.0.0.0 Safari/537.36"
             ),
-            locale="es-ES"
+            locale="es-ES",
+            timezone_id="Europe/Madrid",
         )
+
+        # Inyectamos stealth
+        await context.add_init_script(STEALTH_JS)
+
         page: Page = await context.new_page()
         next_url = start_url
         page_num = 1
@@ -94,46 +118,45 @@ async def scraper_tripadvisor(start_url: str, delay: float = 2.0) -> List[Dict]:
             await page.goto(next_url, timeout=30000)
             await page.wait_for_load_state("networkidle")
 
-            # 1) Cerrar banner de cookies si existe
+            # 1) Aceptar cookies
             try:
-                btn = await page.query_selector(COOKIE_ACCEPT_BUTTON)
-                if btn:
+                if btn := await page.query_selector(COOKIE_ACCEPT_BUTTON):
                     await btn.click()
-                    logger.info("Banner de cookies aceptado")
+                    logger.info("Cookies banner cerrado")
                     await asyncio.sleep(1)
-            except Exception:
+            except:
                 pass
 
-            # 2) Scroll “fuerte” para cargar reseñas diferidas
+            # 2) Scroll “fuerte” varias veces
             for _ in range(5):
                 await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
                 await asyncio.sleep(1)
 
-            # 3) Esperar a que el selector de reseñas aparezca
+            # 3) Esperar al selector de reviews
             try:
                 await page.wait_for_selector(REVIEW_CARD_SELECTOR, timeout=15000)
-            except Exception:
-                logger.warning("Sigue sin aparecer ninguna reseña tras scroll")
+            except:
+                logger.warning("Timeout esperando reseñas tras scroll")
 
+            # 4) Extraer HTML y parsear
             html = await page.content()
-            logger.info(f"[Playwright] HTML obtenido ({len(html)} caracteres)")
+            logger.info(f"[Playwright] HTML obtenido ({len(html)} car.)")
             reviews = await parsear_pagina(html)
 
             if not reviews:
-                logger.info("No hay reviews en esta página, deteniendo.")
+                logger.info("No hay reseñas en esta página, deteniendo.")
                 break
             all_reviews.extend(reviews)
 
-            # 4) Paginación: siguiente
-            elem = await page.query_selector(NEXT_BUTTON_SELECTOR)
-            if not elem:
-                logger.info("No hay botón 'Página siguiente'; fin de paginación.")
+            # 5) Paginación: click en “siguiente”
+            if not (btn := await page.query_selector(NEXT_BUTTON_SELECTOR)):
+                logger.info("No hay botón 'Siguiente'; fin de paginación.")
                 break
-            href = await elem.get_attribute("href")
+            href = await btn.get_attribute("href")
             if not href:
                 break
             next_url = urljoin(BASE_DOMAIN, href)
-            logger.info(f"Next page URL: {next_url}")
+            logger.info(f"Siguiente página URL: {next_url}")
             page_num += 1
             await asyncio.sleep(delay)
 
