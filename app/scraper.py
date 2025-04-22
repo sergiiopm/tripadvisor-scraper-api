@@ -1,15 +1,13 @@
 import re
 import json
 import time
-import random
 import logging
-
 from typing import List, Dict
 from urllib.parse import urljoin
 
-import httpx
+from playwright.sync_api import sync_playwright
 
-# ─── Configuración de logging ─────────────────────────────────────
+# ─── Logging ────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -19,61 +17,59 @@ logger = logging.getLogger(__name__)
 
 # ─── Constantes ────────────────────────────────────────────────────
 BASE_DOMAIN = "https://www.tripadvisor.es"
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/116.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) "
-    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-    "Version/16.6 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/115.0.0.0 Safari/537.36",
-]
+VIEWPORT = {"width": 1280, "height": 800}
 
-def fetch_html(url: str) -> str:
+def obtener_html_con_playwright(url: str) -> str:
     """
-    Descarga la página usando HTTP/2 y un User‑Agent aleatorio.
+    Lanza un Chromium headless con Playwright, navega a la URL y devuelve
+    el HTML renderizado (incluyendo el <script> con pageManifest).
     """
-    ua = random.choice(USER_AGENTS)
-    headers = {
-        "User-Agent": ua,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
-        "Accept-Language": "es-ES,es;q=0.8",
-        "Referer": "https://www.google.com/",
-        "Connection": "keep-alive",
-    }
-    logger.info(f"GET (HTTP/2) {url}")
-    with httpx.Client(http2=True, headers=headers, timeout=15) as client:
-        resp = client.get(url)
-        logger.info(f"→ Status code: {resp.status_code}")
-        resp.raise_for_status()
-        return resp.text
+    logger.info(f"[Playwright] Navegando a {url}")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=[
+            "--no-sandbox", "--disable-setuid-sandbox"
+        ])
+        context = browser.new_context(
+            viewport=VIEWPORT,
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/116.0.0.0 Safari/537.36"
+            ),
+            locale="es-ES"
+        )
+        page = context.new_page()
+        page.goto(url, timeout=30000)
+        # Espera a que cargue el script de TripAdvisor (script[type="application/json"] u otro)
+        page.wait_for_load_state("networkidle")
+        html = page.content()
+        browser.close()
+    logger.info(f"[Playwright] HTML obtenido ({len(html)} caracteres)")
+    return html
 
 def extract_page_manifest(html: str) -> Dict:
     """
-    Extrae el objeto JavaScript `pageManifest:{ ... };` y lo devuelve como dict.
+    Extrae el objeto JavaScript `pageManifest: {...};` y lo devuelve como dict.
     """
     logger.info("Buscando pageManifest en el HTML...")
     m = re.search(r"pageManifest\s*:\s*(\{.+?\});", html, re.DOTALL)
     if not m:
         logger.error("No se encontró pageManifest en la página.")
         raise RuntimeError("pageManifest not found")
-    manifest_json = m.group(1)
-    data = json.loads(manifest_json)
+    data = json.loads(m.group(1))
     logger.info("pageManifest parseado correctamente.")
     return data
 
 def parse_reviews_from_manifest(manifest: Dict) -> List[Dict]:
     """
-    Recorre el manifest y extrae las reseñas encontradas en cualquier sección
-    que incluya la clave 'listResults'.
+    Recorre el manifest y extrae todas las reseñas
+    de las secciones que incluyan 'listResults'.
     """
     reviews = []
-    for section_name, section in manifest.items():
-        if isinstance(section, dict) and "listResults" in section:
-            items = section["listResults"]
-            logger.info(f"Extrayendo {len(items)} reseñas de la sección '{section_name}'")
+    for section, content in manifest.items():
+        if isinstance(content, dict) and "listResults" in content:
+            items = content["listResults"]
+            logger.info(f"Extrayendo {len(items)} reseñas de sección `{section}`")
             for item in items:
                 reviews.append({
                     "user": item.get("userDisplayName"),
@@ -84,25 +80,21 @@ def parse_reviews_from_manifest(manifest: Dict) -> List[Dict]:
                     "review_url": urljoin(BASE_DOMAIN, item.get("url", "")),
                     "review_id": item.get("reviewId"),
                 })
-    logger.info(f"Total reviews extraídas: {len(reviews)}")
+    logger.info(f"Total reseñas extraídas: {len(reviews)}")
     return reviews
 
 def scraper_tripadvisor(start_url: str, delay: float = 2.0) -> List[Dict]:
     """
-    Dada la URL de la ficha de Tripadvisor, descarga la página,
-    extrae el pageManifest y devuelve la lista de reseñas.
+    Dada la URL de TripAdvisor, abre con Playwright, extrae el JSON
+    de pageManifest y devuelve todas las reseñas encontradas.
     """
-    start_url = str(start_url)
     logger.info(f"Iniciando scraper para: {start_url}")
-
-    html = fetch_html(start_url)
+    # 1) Obtenemos el HTML renderizado
+    html = obtener_html_con_playwright(start_url)
+    # 2) Sacamos el manifest
     manifest = extract_page_manifest(html)
+    # 3) Parseamos reseñas
     reviews = parse_reviews_from_manifest(manifest)
-
-    # Opcional: si quieres paginar, podrías leer en manifest:
-    # next_url = manifest.get("properties", {}).get("pagination", {}).get("nextUrl")
-    # if next_url:
-    #     time.sleep(delay)
-    #     reviews += scraper_tripadvisor(urljoin(BASE_DOMAIN, next_url), delay)
-
+    # 4) Si hubiera paginación en el manifest, podrías recursar aquí
+    #    por ejemplo leyendo manifest["properties"]["pagination"]["nextUrl"]
     return reviews
